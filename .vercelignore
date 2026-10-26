@@ -1,0 +1,7 @@
+datasets
+node_modules
+.next
+public/models
+public/tfjs
+public/celebs
+AGENTS.md
