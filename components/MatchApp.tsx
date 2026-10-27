@@ -35,9 +35,12 @@ export default function MatchApp() {
   const [error, setError] = useState<string | null>(null);
   const [shot, setShot] = useState<Shot | null>(null);
   const [matches, setMatches] = useState<Match[] | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const shotUrlRef = useRef<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Pull the celebrity descriptors. Served as a static file so the dataset can
   // be swapped by replacing one file, without touching the bundle.
@@ -62,8 +65,19 @@ export default function MatchApp() {
   useEffect(() => {
     return () => {
       if (shotUrlRef.current) URL.revokeObjectURL(shotUrlRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
+
+  // The <video> element only exists once the camera panel renders, so the
+  // stream is attached here rather than inside openCamera.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (cameraOpen && video && streamRef.current) {
+      video.srcObject = streamRef.current;
+      void video.play().catch(() => {});
+    }
+  }, [cameraOpen]);
 
   const stageIndex = stageLabel ? STAGES.indexOf(stageLabel) : -1;
   const stagePercent = stageIndex < 0 ? 0 : ((stageIndex + 1) / STAGES.length) * 100;
@@ -114,6 +128,59 @@ export default function MatchApp() {
 
   const onPick = () => inputRef.current?.click();
 
+  const closeCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setCameraOpen(false);
+  }, []);
+
+  const openCamera = async () => {
+    setError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("This browser can't open a camera here. Try choosing a photo instead.");
+      return;
+    }
+    try {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      setCameraOpen(true);
+    } catch (err) {
+      const denied = err instanceof DOMException && err.name === "NotAllowedError";
+      setError(
+        denied
+          ? "Camera permission was blocked. Allow camera access in your browser settings, or choose a photo instead."
+          : "Couldn't start the camera. Check that one is connected and not in use by another app.",
+      );
+    }
+  };
+
+  // Grabs the current video frame, mirrored to match the selfie preview, and
+  // feeds it through the same path as an uploaded file.
+  const capture = () => {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(
+      (blob) => {
+        closeCamera();
+        if (blob) void handleFile(new File([blob], "camera.jpg", { type: "image/jpeg" }));
+      },
+      "image/jpeg",
+      0.92,
+    );
+  };
+
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault();
     setDragOver(false);
@@ -141,7 +208,7 @@ export default function MatchApp() {
             is your face?
           </h1>
           <p className="standfirst">
-            Drop in a photo. Your face gets turned into 128 numbers, and those numbers get
+            Drop in a photo or take a selfie. Your face gets turned into 128 numbers, and those numbers get
             compared against every star in the reference set.
           </p>
         </div>
@@ -158,6 +225,20 @@ export default function MatchApp() {
             }}
           />
 
+          {cameraOpen ? (
+            <div className="camera">
+              <video ref={videoRef} className="camera-feed" playsInline muted />
+              <div className="camera-actions">
+                <button type="button" className="btn" onClick={capture}>
+                  Click photo
+                </button>
+                <button type="button" className="btn btn-outline" onClick={closeCamera}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+          <>
           <button
             type="button"
             className={`dropzone${dragOver ? " is-over" : ""}`}
@@ -175,6 +256,17 @@ export default function MatchApp() {
               {busy ? "Hold on a moment" : "or drag one onto this panel"}
             </p>
           </button>
+
+          <button
+            type="button"
+            className="btn btn-outline camera-open"
+            disabled={busy}
+            onClick={() => void openCamera()}
+          >
+            Open camera
+          </button>
+          </>
+          )}
 
           {busy && stageLabel && (
             <div className="progress">
@@ -278,6 +370,16 @@ export default function MatchApp() {
               <div className="actions">
                 <button type="button" className="btn" onClick={onPick}>
                   Try another photo
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  onClick={() => {
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                    void openCamera();
+                  }}
+                >
+                  Use camera
                 </button>
                 <button type="button" className="btn btn-quiet" onClick={reset}>
                   Clear

@@ -524,6 +524,47 @@ button {
   border: 2px solid var(--paper-faint);
 }
 
+/* Quiet button for the light paper plate, where .btn-quiet would vanish. */
+.btn-outline {
+  background: transparent;
+  color: var(--ink);
+  border: 2px solid rgba(20, 18, 58, 0.35);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* ---------------------------- camera ---------------------------- */
+
+.camera-open {
+  width: 100%;
+  margin-top: 0.75rem;
+}
+
+.camera-feed {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: var(--ink-deep);
+  border-radius: var(--plate-radius);
+  /* Mirrored, like every selfie camera; the captured frame matches. */
+  transform: scaleX(-1);
+}
+
+.camera-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.camera-actions .btn {
+  flex: 1 1 8rem;
+}
+
 .actions {
   margin-top: 1.75rem;
   display: flex;
