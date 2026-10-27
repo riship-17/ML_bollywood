@@ -24,6 +24,14 @@
  *   --max-per-person N Cap images per person (speed). Default: 40
  *   --min-faces N      Drop people with fewer than N usable faces. Default: 2
  *   --backend <name>   Force "wasm" instead of trying native tfjs-node first.
+ *   --crops            Images are tight, pre-cropped faces (e.g. the 64x64
+ *                      Kaggle crops). Upscales each one and pads it with a
+ *                      neutral border so the detector sees a face in context;
+ *                      without this most tight crops go undetected.
+ *   --resume           Keep the people already in --out and skip them.
+ *
+ * The output is rewritten after every person, so an interrupted run keeps what
+ * it finished and --resume carries on from there.
  *
  * Only the resulting 128 numbers per person are needed by the app. No source
  * image is copied anywhere unless you explicitly pass --thumbs.
@@ -43,6 +51,8 @@ function parseArgs(argv) {
     maxPerPerson: 40,
     minFaces: 2,
     backend: null,
+    crops: false,
+    resume: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -57,6 +67,8 @@ function parseArgs(argv) {
     else if (a === "--max-per-person") args.maxPerPerson = Number(next());
     else if (a === "--min-faces") args.minFaces = Number(next());
     else if (a === "--backend") args.backend = next();
+    else if (a === "--crops") args.crops = true;
+    else if (a === "--resume") args.resume = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -153,13 +165,55 @@ async function loadDeps(preferred) {
   process.exit(1);
 }
 
+// SSD MobileNet is trained on faces that sit inside a wider scene. A crop where
+// the face fills the frame gives it nothing to anchor on, so tight crops are
+// enlarged and given a border half their size on every side. Measured on one
+// 79-image folder of 64x64 crops: 23 detected as-is, 79 with this treatment.
+const CROP_SIZE = 160;
+const CROP_PAD = CROP_SIZE / 2;
+
+async function loadImage(sharp, filePath, crops) {
+  const base = sharp(filePath).rotate().removeAlpha();
+  if (!crops) {
+    return base
+      .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+  }
+  const enlarged = await base.resize(CROP_SIZE, CROP_SIZE, { fit: "cover" }).toBuffer();
+  return sharp(enlarged)
+    .extend({
+      top: CROP_PAD,
+      bottom: CROP_PAD,
+      left: CROP_PAD,
+      right: CROP_PAD,
+      background: { r: 128, g: 128, b: 128 },
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+}
+
+// Write to a sibling temp file and rename, so a run killed mid-write never
+// leaves a truncated JSON behind for the app to choke on.
+async function writeDataset(outPath, celebrities) {
+  const dataset = {
+    version: 1,
+    dimensions: celebrities[0].descriptor.length,
+    generatedAt: new Date().toISOString(),
+    celebrities,
+  };
+  const tmp = `${outPath}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(dataset), "utf8");
+  await fs.rename(tmp, outPath);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help || !args.input) {
     console.log(
       "Usage: node scripts/build-embeddings.mjs --input <dataset-dir> [--out public/celebrities.json]\n" +
-        "       [--thumbs public/celebs] [--max-per-person 40] [--min-faces 2] [--backend wasm]",
+        "       [--thumbs public/celebs] [--max-per-person 40] [--min-faces 2] [--backend wasm] [--crops] [--resume]",
     );
     process.exit(args.help ? 0 : 1);
   }
@@ -195,12 +249,27 @@ async function main() {
 
   if (args.thumbs) await fs.mkdir(path.resolve(args.thumbs), { recursive: true });
 
+  const outPath = path.resolve(args.out);
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+
   const celebrities = [];
+  if (args.resume) {
+    try {
+      const existing = JSON.parse(await fs.readFile(outPath, "utf8"));
+      celebrities.push(...existing.celebrities);
+      console.log(`Resuming: ${celebrities.length} people already in ${args.out}.\n`);
+    } catch {
+      console.log(`Resuming: nothing usable in ${args.out}, starting fresh.\n`);
+    }
+  }
+  const done = new Set(celebrities.map((c) => c.slug));
+
   let totalImages = 0;
   let totalFaces = 0;
 
   for (let p = 0; p < personDirs.length; p++) {
     const person = personDirs[p];
+    if (done.has(slugify(person.name))) continue;
     const personPath = path.join(inputDir, person.name);
     const files = (await fs.readdir(personPath))
       .filter((f) => IMAGE_EXT.has(path.extname(f).toLowerCase()))
@@ -216,12 +285,7 @@ async function main() {
       totalImages++;
       let tensor = null;
       try {
-        const { data, info } = await sharp(filePath)
-          .rotate()
-          .removeAlpha()
-          .resize({ width: 640, height: 640, fit: "inside", withoutEnlargement: true })
-          .raw()
-          .toBuffer({ resolveWithObject: true });
+        const { data, info } = await loadImage(sharp, filePath, args.crops);
 
         tensor = tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]);
 
@@ -269,6 +333,7 @@ async function main() {
         .toFile(path.join(path.resolve(args.thumbs), `${slug}.jpg`));
     }
 
+    await writeDataset(outPath, celebrities);
     console.log(`${progress} ${label} — ${descriptors.length}/${files.length} faces`);
   }
 
@@ -277,16 +342,7 @@ async function main() {
     process.exit(1);
   }
 
-  const dataset = {
-    version: 1,
-    dimensions: celebrities[0].descriptor.length,
-    generatedAt: new Date().toISOString(),
-    celebrities,
-  };
-
-  const outPath = path.resolve(args.out);
-  await fs.mkdir(path.dirname(outPath), { recursive: true });
-  await fs.writeFile(outPath, JSON.stringify(dataset), "utf8");
+  await writeDataset(outPath, celebrities);
 
   const sizeKb = ((await fs.stat(outPath)).size / 1024).toFixed(0);
   console.log(

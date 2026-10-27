@@ -110,6 +110,19 @@ You point the script at a dataset you have, and it writes out nothing but number
 | `--max-per-person N` | `40` | Cap images per person, for speed |
 | `--min-faces N` | `2` | Drop people with fewer usable faces |
 | `--backend <name>` | auto | Force `wasm` instead of trying native first |
+| `--crops` | off | Images are tight pre-cropped faces — upscale and pad them before detection |
+| `--resume` | off | Keep people already in `--out` and continue with the rest |
+
+The output is rewritten after every person, so a run that is interrupted (a laptop going
+to sleep, a closed terminal) keeps what it finished. Rerun with `--resume` to carry on.
+
+**The Kaggle dataset needs `--crops`.** Its images are 64×64 crops where the face fills
+the frame, and SSD MobileNet misses most of them as-is (23 of 79 in one folder). Enlarging
+each crop and padding it with a neutral border recovers essentially all of them (79 of 79):
+
+```bash
+npm run embeddings -- --input ./datasets/bollywood_celeb_faces --crops --max-per-person 1000
+```
 
 `--thumbs public/celebs` will cut a representative face per person if you want the app to
 show pictures. That directory is gitignored, and whether you have the right to publish
@@ -123,8 +136,12 @@ the portable one, because the native package's install step downloads a platform
 and fails on locked-down networks. For a large dataset it is worth adding:
 
 ```bash
-npm install --no-save @tensorflow/tfjs-node
+npm install --no-save sharp @tensorflow/tfjs@4.22.0 @tensorflow/tfjs-node
 ```
+
+List all three in one command: a later `--no-save` install prunes packages an earlier one
+added. `@tensorflow/tfjs-node` 4.x also calls `util.isNullOrUndefined`, which Node 23
+removed, so on Node 23+ it fails mid-run — pass `--backend wasm` there.
 
 ---
 
